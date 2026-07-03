@@ -129,6 +129,27 @@ Any `ListeningEvent` with `listened_at >= cutoff` is included. A 24-hour window 
 **Fix and side-effect check:**
 Changed `RECENT_THRESHOLD = timedelta(hours=24)` to `RECENT_THRESHOLD = timedelta(minutes=30)`. This excludes yesterday's events while including genuine recent activity. `get_activity_feed()` in the same file does NOT use `RECENT_THRESHOLD` — it intentionally has no time window — so it is unaffected. The constant name and the query logic are unchanged; only the value changes.
 
+### Issue #3 — The same song keeps showing up twice in search
+
+**How I reproduced it:**
+With seed data loaded, `GET /songs/search?q=Crown+Heights` returned the same song ("Crown Heights Anthem") three times. That song has three tags (rap, hip-hop, boom bap). A song with one tag appeared once; a song with no tags appeared once. The `test_search_no_duplicates_multi_tag_song` test confirmed: expected 1, got 3.
+
+**How I found the root cause:**
+I opened `services/search_service.py → search_songs()`. The query:
+```python
+db.session.query(Song)
+    .outerjoin(song_tags, Song.id == song_tags.c.song_id)
+    .filter(...)
+    .all()
+```
+An SQL outer join between `Song` and `song_tags` produces one result row per `song_tags` entry. A song with 3 tags generates 3 rows in the joined result set. SQLAlchemy's `query(Song)` maps each row to a Song ORM object — so 3 identical Song objects are returned. `[song.to_dict() for song in results]` then serializes all three, producing three identical dicts.
+
+**Root cause:**
+The `outerjoin` on `song_tags` is needed to allow filtering by tag, but without `.distinct()`, each tag match produces a separate copy of the song in the result. The number of duplicates equals the number of matching tags on the song.
+
+**Fix and side-effect check:**
+Added `.distinct()` before `.all()`. SQLAlchemy adds `SELECT DISTINCT` to the SQL, collapsing duplicate `Song` rows. Songs with zero tags or one tag are unaffected (they already produced one row). The `Song.to_dict()` call resolves the `tags` relationship via a subquery (configured in the model), so the tag list is still complete even after deduplication at the query level. All five search tests pass.
+
 ---
 
 ## Git Commit History
@@ -137,3 +158,4 @@ Changed `RECENT_THRESHOLD = timedelta(hours=24)` to `RECENT_THRESHOLD = timedelt
 |---|---------------|-----|
 | 1 | `fix: remove incorrect Sunday exclusion from streak increment logic` | Issue #1 |
 | 2 | `fix: reduce Friends Listening Now threshold from 24 hours to 30 minutes` | Issue #2 |
+| 3 | `fix: add distinct() to search query to prevent duplicate results for multi-tag songs` | Issue #3 |
