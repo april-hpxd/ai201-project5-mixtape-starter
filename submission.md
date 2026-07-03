@@ -110,6 +110,25 @@ On line 73 I saw the actual condition: `elif days_since_last == 1 and today.week
 **Fix and side-effect check:**
 Removed `and today.weekday() != 6` from line 73, leaving `elif days_since_last == 1:`. This is the only condition needed — the `days_since_last` computation already correctly identifies consecutive days regardless of weekday. All four other streak tests (new user, consecutive non-Sunday, same-day double, skipped day) were run and still pass — the fix touches only this one guard.
 
+### Issue #2 — Friends Listening Now shows people from yesterday
+
+**How I reproduced it:**
+With the seeded database, calling `GET /feed/<nova_id>/listening-now` returned friend events that were 20+ hours old (from the previous day), alongside genuinely recent events. The endpoint claims to show who is listening "now" but showed stale activity.
+
+**How I found the root cause:**
+I opened `services/feed_service.py`. The cutoff is computed as:
+```python
+RECENT_THRESHOLD = timedelta(hours=24)
+cutoff = datetime.now(timezone.utc) - RECENT_THRESHOLD
+```
+Any `ListeningEvent` with `listened_at >= cutoff` is included. A 24-hour window is correct for "recent activity," but "Friends Listening Now" implies real-time presence — not whether someone listened at any point in the last day. The seed data has listening events from 1 day ago and 14 days ago; the 24-hour threshold included the 1-day-ago events. I confirmed the seed data creates three "recent" events 10–30 minutes ago, which is the correct population for "listening now."
+
+**Root cause:**
+`RECENT_THRESHOLD = timedelta(hours=24)` was too broad. A user who listened 23 hours ago (yesterday evening) satisfied `listened_at >= cutoff` and appeared as "listening now." The feature semantics require a tight real-time window, not a 24-hour lookback.
+
+**Fix and side-effect check:**
+Changed `RECENT_THRESHOLD = timedelta(hours=24)` to `RECENT_THRESHOLD = timedelta(minutes=30)`. This excludes yesterday's events while including genuine recent activity. `get_activity_feed()` in the same file does NOT use `RECENT_THRESHOLD` — it intentionally has no time window — so it is unaffected. The constant name and the query logic are unchanged; only the value changes.
+
 ---
 
 ## Git Commit History
@@ -117,3 +136,4 @@ Removed `and today.weekday() != 6` from line 73, leaving `elif days_since_last =
 | # | Commit message | Bug |
 |---|---------------|-----|
 | 1 | `fix: remove incorrect Sunday exclusion from streak increment logic` | Issue #1 |
+| 2 | `fix: reduce Friends Listening Now threshold from 24 hours to 30 minutes` | Issue #2 |
