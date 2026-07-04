@@ -150,6 +150,35 @@ The `outerjoin` on `song_tags` is needed to allow filtering by tag, but without 
 **Fix and side-effect check:**
 Added `.distinct()` before `.all()`. SQLAlchemy adds `SELECT DISTINCT` to the SQL, collapsing duplicate `Song` rows. Songs with zero tags or one tag are unaffected (they already produced one row). The `Song.to_dict()` call resolves the `tags` relationship via a subquery (configured in the model), so the tag list is still complete even after deduplication at the query level. All five search tests pass.
 
+### Issue #4 — I got notified when a friend added my song to a playlist but not when they rated it
+
+**How I reproduced it:**
+I called `POST /songs/<song_id>/rate` with a different user's ID than the sharer. Then I checked `GET /users/<sharer_id>/notifications` — the list was empty. Repeating the same test with `add_to_playlist` produced a notification as expected.
+
+**How I found the root cause:**
+I read `notification_service.py` and compared `add_to_playlist()` and `rate_song()` side by side. `add_to_playlist()` ends with:
+```python
+if song.shared_by != added_by_user_id:
+    create_notification(user_id=song.shared_by, ...)
+```
+`rate_song()` has no such block — it commits the rating and immediately returns. The notification logic was simply never added to `rate_song()`. Both functions are in the same file; the `create_notification()` helper exists and is tested. The omission is architectural: the rating path was implemented without mirroring the notification pattern that the playlist-add path uses.
+
+**Root cause:**
+`rate_song()` in `notification_service.py` committed the `Rating` row but never called `create_notification()`. The notification for "song rated" was never created, so the song sharer had no way to know their song received a rating.
+
+**Fix and side-effect check:**
+Added notification creation after `db.session.commit()` in `rate_song()`, using the same guard (`song.shared_by != user_id`) as `add_to_playlist()`:
+```python
+if song.shared_by != user_id:
+    create_notification(
+        user_id=song.shared_by,
+        notification_type="song_rated",
+        body=f"{rater.username} rated your song '{song.title}' {score}/5.",
+    )
+```
+Side-effect checks: (1) Self-rating produces no notification (guard prevents it). (2) Updating an existing rating still triggers a notification for the sharer — this is intentional, since the sharer may want to know about score changes. (3) The `get_notifications()` and `mark_as_read()` functions are unmodified. Regression test in `tests/test_notifications.py` verifies both the notification-sent and no-self-notification cases.
+
+
 ---
 
 ## Git Commit History
@@ -159,3 +188,4 @@ Added `.distinct()` before `.all()`. SQLAlchemy adds `SELECT DISTINCT` to the SQ
 | 1 | `fix: remove incorrect Sunday exclusion from streak increment logic` | Issue #1 |
 | 2 | `fix: reduce Friends Listening Now threshold from 24 hours to 30 minutes` | Issue #2 |
 | 3 | `fix: add distinct() to search query to prevent duplicate results for multi-tag songs` | Issue #3 |
+| 4 | `fix: send notification to song sharer when their song is rated` | Issue #4 |
