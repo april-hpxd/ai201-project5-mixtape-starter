@@ -178,6 +178,24 @@ if song.shared_by != user_id:
 ```
 Side-effect checks: (1) Self-rating produces no notification (guard prevents it). (2) Updating an existing rating still triggers a notification for the sharer — this is intentional, since the sharer may want to know about score changes. (3) The `get_notifications()` and `mark_as_read()` functions are unmodified. Regression test in `tests/test_notifications.py` verifies both the notification-sent and no-self-notification cases.
 
+### Issue #5 — The last song in a playlist never shows up
+
+**How I reproduced it:**
+With a seeded playlist of 5 songs, `GET /playlists/<id>/songs` returned only 4 songs. The `test_playlist_returns_all_songs` test asserted `len(songs) == 5` and failed with 4.
+
+**How I found the root cause:**
+I opened `services/playlist_service.py → get_playlist_songs()`. The SQL query correctly joins `playlist_entries`, filters by `playlist_id`, and orders by `position` ascending. Then line 66:
+```python
+return [song.to_dict() for song in songs[:-1]]
+```
+Python's `[:-1]` slice returns all elements except the last. With 5 songs, this returns songs 1–4 and silently drops song 5 (the one at the highest position). An empty playlist returns `[][:-1]` which is `[]` — so the edge case accidentally works, hiding the bug for empty playlists.
+
+**Root cause:**
+`songs[:-1]` is an off-by-one slice error that always excludes the last song in the ordered result. Because the query sorts by `position` ascending, the dropped song is always the one assigned the highest position number — the last track in the playlist.
+
+**Fix and side-effect check:**
+Changed `songs[:-1]` to `songs` on line 66. This is a single character-range deletion with no logic change — the query, ordering, and serialization are all correct; only the slice was wrong. Verified: (1) 5-song playlist returns 5 songs in order — passes. (2) Empty playlist returns `[]` — still passes, because `[][:]` is `[]`. (3) `get_playlist()` (metadata only) and `get_user_playlists()` are in the same file and are unaffected.
+
 
 ---
 
@@ -189,3 +207,4 @@ Side-effect checks: (1) Self-rating produces no notification (guard prevents it)
 | 2 | `fix: reduce Friends Listening Now threshold from 24 hours to 30 minutes` | Issue #2 |
 | 3 | `fix: add distinct() to search query to prevent duplicate results for multi-tag songs` | Issue #3 |
 | 4 | `fix: send notification to song sharer when their song is rated` | Issue #4 |
+| 5 | `fix: remove [:-1] slice that dropped the last song from every playlist` | Issue #5 |
