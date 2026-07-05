@@ -40,7 +40,8 @@ mixtape-starter/
 └── tests/
     ├── test_streaks.py
     ├── test_search.py
-    └── test_playlists.py
+    ├── test_playlists.py
+    └── test_notifications.py  # Added as regression test
 ```
 
 ### Models (models.py)
@@ -110,6 +111,8 @@ On line 73 I saw the actual condition: `elif days_since_last == 1 and today.week
 **Fix and side-effect check:**
 Removed `and today.weekday() != 6` from line 73, leaving `elif days_since_last == 1:`. This is the only condition needed — the `days_since_last` computation already correctly identifies consecutive days regardless of weekday. All four other streak tests (new user, consecutive non-Sunday, same-day double, skipped day) were run and still pass — the fix touches only this one guard.
 
+---
+
 ### Issue #2 — Friends Listening Now shows people from yesterday
 
 **How I reproduced it:**
@@ -128,6 +131,8 @@ Any `ListeningEvent` with `listened_at >= cutoff` is included. A 24-hour window 
 
 **Fix and side-effect check:**
 Changed `RECENT_THRESHOLD = timedelta(hours=24)` to `RECENT_THRESHOLD = timedelta(minutes=30)`. This excludes yesterday's events while including genuine recent activity. `get_activity_feed()` in the same file does NOT use `RECENT_THRESHOLD` — it intentionally has no time window — so it is unaffected. The constant name and the query logic are unchanged; only the value changes.
+
+---
 
 ### Issue #3 — The same song keeps showing up twice in search
 
@@ -149,6 +154,8 @@ The `outerjoin` on `song_tags` is needed to allow filtering by tag, but without 
 
 **Fix and side-effect check:**
 Added `.distinct()` before `.all()`. SQLAlchemy adds `SELECT DISTINCT` to the SQL, collapsing duplicate `Song` rows. Songs with zero tags or one tag are unaffected (they already produced one row). The `Song.to_dict()` call resolves the `tags` relationship via a subquery (configured in the model), so the tag list is still complete even after deduplication at the query level. All five search tests pass.
+
+---
 
 ### Issue #4 — I got notified when a friend added my song to a playlist but not when they rated it
 
@@ -178,6 +185,8 @@ if song.shared_by != user_id:
 ```
 Side-effect checks: (1) Self-rating produces no notification (guard prevents it). (2) Updating an existing rating still triggers a notification for the sharer — this is intentional, since the sharer may want to know about score changes. (3) The `get_notifications()` and `mark_as_read()` functions are unmodified. Regression test in `tests/test_notifications.py` verifies both the notification-sent and no-self-notification cases.
 
+---
+
 ### Issue #5 — The last song in a playlist never shows up
 
 **How I reproduced it:**
@@ -196,6 +205,19 @@ Python's `[:-1]` slice returns all elements except the last. With 5 songs, this 
 **Fix and side-effect check:**
 Changed `songs[:-1]` to `songs` on line 66. This is a single character-range deletion with no logic change — the query, ordering, and serialization are all correct; only the slice was wrong. Verified: (1) 5-song playlist returns 5 songs in order — passes. (2) Empty playlist returns `[]` — still passes, because `[][:]` is `[]`. (3) `get_playlist()` (metadata only) and `get_user_playlists()` are in the same file and are unaffected.
 
+---
+
+## Regression Test
+
+**File:** `tests/test_notifications.py`
+
+**Tests:**
+- `test_rating_sends_notification_to_sharer` — calls `rate_song()` where the rater is different from the sharer, then asserts `get_notifications(sharer_id)` returns exactly one notification with `type == "song_rated"` and the rater's username and song title in the body.
+- `test_self_rating_does_not_send_notification` — calls `rate_song()` where the sharer rates their own song, then asserts no notification is created.
+
+**Why this would have failed against buggy code:** Before the fix, `rate_song()` never called `create_notification()`. The first test would have asserted `len(notifications) == 1` but gotten 0, failing immediately. The second test would have passed coincidentally (0 == 0), but that's immaterial — the first test is the definitive regression guard.
+
+**Why this prevents future regressions:** Any future refactor of `rate_song()` that drops the notification call will be caught by this test before it ships.
 
 ---
 
@@ -208,3 +230,4 @@ Changed `songs[:-1]` to `songs` on line 66. This is a single character-range del
 | 3 | `fix: add distinct() to search query to prevent duplicate results for multi-tag songs` | Issue #3 |
 | 4 | `fix: send notification to song sharer when their song is rated` | Issue #4 |
 | 5 | `fix: remove [:-1] slice that dropped the last song from every playlist` | Issue #5 |
+| 6 | `test: add regression tests for song-rated notification` | Regression test |
